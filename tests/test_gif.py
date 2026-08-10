@@ -393,6 +393,40 @@ def test_render_gif_ts_detection_mode(tmp_path, ts_bonds, auto_detect, expected)
     assert config.ts_bonds == expected
 
 
+@pytest.mark.parametrize("gif_rot", [None, "z"])
+def test_render_gif_normal_mode_keeps_shared_camera_center(tmp_path, gif_rot):
+    """Ordinary vibration frames must be oriented around one shared centre."""
+    from unittest.mock import patch
+
+    from xyzrender import render_gif
+    from xyzrender.gif import _fixed_viewport
+
+    frames = [
+        {"symbols": ["C", "C"], "positions": [[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]]},
+        {"symbols": ["C", "C"], "positions": [[0.3, 0.2, 0.0], [1.7, 0.2, 0.0]]},
+    ]
+    with (
+        patch("graphrc.load_trajectory", return_value={"frames": frames}),
+        patch("xyzrender.gif._fixed_viewport", wraps=_fixed_viewport) as mock_viewport,
+        patch("xyzrender.gif._render_frames", return_value=[b"", b""]) as mock_render,
+        patch("xyzrender.gif._stitch_gif"),
+    ):
+        render_gif(
+            "examples/structures/sn2.out",
+            gif_vib=0,
+            gif_rot=gif_rot,
+            orient=True,
+            vib_frames=4,
+            output=tmp_path / "vib.gif",
+        )
+
+    rendered_frames = mock_render.call_args.args[1]
+    centroids = [np.asarray(frame["positions"], dtype=float).mean(axis=0) for frame in rendered_frames]
+    np.testing.assert_allclose(centroids[0], np.zeros(3), atol=1e-12)
+    np.testing.assert_allclose(np.linalg.norm(centroids[1] - centroids[0]), 0.25, atol=1e-12)
+    assert mock_viewport.call_args.kwargs["reference_frame"] is not None
+
+
 @pytest.mark.parametrize("ts_bonds", [[(1, 1)], [(1, 999)]])
 def test_render_gif_ts_rejects_invalid_manual_bonds(tmp_path, ts_bonds):
     from unittest.mock import patch

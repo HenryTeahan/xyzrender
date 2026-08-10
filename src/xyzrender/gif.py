@@ -108,12 +108,13 @@ def _rotation_axis(axis_str: str, lattice: np.ndarray | None = None) -> tuple[np
     return v / np.linalg.norm(v), sign
 
 
-def _orient_frames(frames: list[dict], vt: np.ndarray) -> list[dict]:
-    """Apply a fixed PCA rotation to all frames (center each frame independently)."""
+def _orient_frames(frames: list[dict], vt: np.ndarray, center: np.ndarray | None = None) -> list[dict]:
+    """Apply a fixed PCA rotation to all frames."""
     oriented = []
     for frame in frames:
         pos = np.array(frame["positions"])
-        centered = pos - pos.mean(axis=0)
+        frame_center = pos.mean(axis=0) if center is None else center
+        centered = pos - frame_center
         new_frame = {
             "symbols": frame["symbols"],
             "positions": (centered @ vt.T).tolist(),
@@ -128,7 +129,7 @@ def _orient_frames(frames: list[dict], vt: np.ndarray) -> list[dict]:
     return oriented
 
 
-def _orient_graph(graph, vt: np.ndarray, cell_data=None) -> None:
+def _orient_graph(graph, vt: np.ndarray, cell_data=None, center: np.ndarray | None = None) -> None:
     """Apply PCA rotation to graph node positions in-place.
 
     When *cell_data* is given, the lattice and cell origin on it are also
@@ -137,7 +138,7 @@ def _orient_graph(graph, vt: np.ndarray, cell_data=None) -> None:
     """
     nodes = list(graph.nodes())
     pos = np.array([graph.nodes[n]["position"] for n in nodes])
-    centroid = pos.mean(axis=0)
+    centroid = pos.mean(axis=0) if center is None else center
     rotated = (pos - centroid) @ vt.T
     for i, nid in enumerate(nodes):
         graph.nodes[nid]["position"] = tuple(rotated[i].tolist())
@@ -363,6 +364,10 @@ def render_vibration_gif(
         frames = trajectory["frames"]
         frequencies = trajectory.get("frequencies")
 
+    fixed_frame_center = (
+        np.asarray(frames[0]["positions"], dtype=float).mean(axis=0) if normalize_displacements else None
+    )
+
     normalization_scale = _normal_mode_normalization_scale(frames) if normalize_displacements else 1.0
     requested_cartesian_scale = normalization_scale * vib_scale
     effective_scale = (
@@ -413,8 +418,8 @@ def render_vibration_gif(
         import copy
 
         vt = pca_matrix(np.array(frames[0]["positions"]))
-        frames = _orient_frames(frames, vt)
-        _orient_graph(ts_graph, vt, config.cell_data)
+        frames = _orient_frames(frames, vt, center=fixed_frame_center)
+        _orient_graph(ts_graph, vt, config.cell_data, center=fixed_frame_center)
         config = copy.copy(config)
         config.auto_orient = False
 
@@ -422,7 +427,7 @@ def render_vibration_gif(
         if n_frames is not None:
             logger.warning("n_frames is ignored without axis")
         # Fixed viewport across all frames so every PNG has identical dimensions
-        config = _fixed_viewport(frames, config)
+        config = _fixed_viewport(frames, config, reference_frame=frames[0] if normalize_displacements else None)
 
         # graphRC's frames are already a full oscillation cycle — just loop
         logger.info("Rendering vibration GIF (%d frames)", len(frames))
@@ -443,7 +448,12 @@ def render_vibration_gif(
     axis_vec, axis_sign = _rotation_axis(axis)
 
     # Fixed viewport across all frames so every PNG has identical dimensions
-    rot_cfg = _fixed_viewport(frames, config, rotation_axis=axis_vec)
+    rot_cfg = _fixed_viewport(
+        frames,
+        config,
+        rotation_axis=axis_vec,
+        reference_frame=frames[0] if normalize_displacements else None,
+    )
     if bounce_degrees is not None:
         logger.info(
             "Rendering vibration+bounce GIF (%d vib x %d cycles = %d frames, axis=%s, amplitude=%.2f°)",
@@ -807,7 +817,12 @@ def render_diffuse_gif(
     logger.info("Wrote %s", output)
 
 
-def _fixed_viewport(frames: list[dict], config: RenderConfig, rotation_axis: np.ndarray | None = None) -> RenderConfig:
+def _fixed_viewport(
+    frames: list[dict],
+    config: RenderConfig,
+    rotation_axis: np.ndarray | None = None,
+    reference_frame: dict | None = None,
+) -> RenderConfig:
     """Create a config with fixed viewport so every frame has identical canvas size.
 
     When *rotation_axis* is given, computes the exact projection envelope for
@@ -827,9 +842,10 @@ def _fixed_viewport(frames: list[dict], config: RenderConfig, rotation_axis: np.
         atom_pad = max_vdw * config.atom_scale * 0.075
 
     all_pos = np.vstack([np.array(f["positions"]) for f in frames])
+    reference_pos = all_pos if reference_frame is None else np.asarray(reference_frame["positions"], dtype=float)
 
     if rotation_axis is not None:
-        centroid = all_pos.mean(axis=0)
+        centroid = reference_pos.mean(axis=0)
         rel = all_pos - centroid
         # Component along the rotation axis (stays fixed as screen-Y)
         along = rel @ rotation_axis
@@ -841,9 +857,15 @@ def _fixed_viewport(frames: list[dict], config: RenderConfig, rotation_axis: np.
         center_xy = (float(centroid[0]), float(centroid[1]))
     else:
         xy = all_pos[:, :2]
+        reference_xy = reference_pos[:, :2]
         lo = xy.min(axis=0) - atom_pad
         hi = xy.max(axis=0) + atom_pad
-        center_xy = (float((lo[0] + hi[0]) / 2), float((lo[1] + hi[1]) / 2))
+        reference_lo = reference_xy.min(axis=0)
+        reference_hi = reference_xy.max(axis=0)
+        center_xy = (
+            float((reference_lo[0] + reference_hi[0]) / 2),
+            float((reference_lo[1] + reference_hi[1]) / 2),
+        )
         fixed_span = float(max((hi - lo).max(), 1e-6))
 
     cfg = copy.copy(config)
